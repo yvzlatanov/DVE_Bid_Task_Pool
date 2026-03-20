@@ -1,0 +1,12 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /sessions/{sessionId}/tasks/{taskId}/{fileName} {
+      allow read: if true;
+      allow write: if fileName.size() > 0
+        && fileName.size() < 500
+        && request.resource != null
+        && request.resource.size < 15 * 1024 * 1024;
+    }
+  }
+}

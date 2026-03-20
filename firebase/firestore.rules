@@ -1,0 +1,90 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function validParticipant(p) {
+      return p is map
+        && p.keys().hasAll(['id', 'displayName', 'email'])
+        && p.id is string
+        && p.id.size() > 0 && p.id.size() <= 128
+        && p.displayName is string
+        && p.displayName.size() > 0 && p.displayName.size() <= 200
+        && p.email is string
+        && p.email.size() <= 320;
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if true;
+
+      allow create: if request.resource.data.keys().hasAll([
+            'title',
+            'bidLabel',
+            'status',
+            'createdAt',
+            'createdBy'
+          ])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 300
+        && request.resource.data.bidLabel is string
+        && request.resource.data.bidLabel.size() <= 300
+        && request.resource.data.status == 'active'
+        && validParticipant(request.resource.data.createdBy);
+
+      allow update: if resource != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status in ['active', 'archived'];
+
+      allow delete: if false;
+
+      match /tasks/{taskId} {
+        allow read: if true;
+        allow create: if request.resource.data.keys().hasAll([
+              'title',
+              'description',
+              'priority',
+              'status',
+              'assigneeIds',
+              'assignees',
+              'links',
+              'attachments',
+              'createdAt',
+              'updatedAt',
+              'createdBy'
+            ])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() <= 400
+          && request.resource.data.description is string
+          && request.resource.data.description.size() <= 20000
+          && request.resource.data.priority in ['low', 'medium', 'high', 'urgent']
+          && request.resource.data.status in ['pooled', 'in_progress', 'done', 'blocked']
+          && request.resource.data.assigneeIds is list
+          && request.resource.data.assignees is list
+          && request.resource.data.links is list
+          && request.resource.data.attachments is list
+          && validParticipant(request.resource.data.createdBy);
+        allow update: if resource != null;
+        allow delete: if false;
+
+        match /comments/{commentId} {
+          allow read: if true;
+          allow create: if request.resource.data.keys().hasAll(['text', 'createdAt', 'createdBy'])
+            && request.resource.data.text is string
+            && request.resource.data.text.size() > 0
+            && request.resource.data.text.size() <= 8000
+            && validParticipant(request.resource.data.createdBy);
+          allow update, delete: if false;
+        }
+      }
+
+      match /audit/{eventId} {
+        allow read: if true;
+        allow create: if request.resource.data.keys().hasAll(['type', 'at', 'actor', 'payload'])
+          && request.resource.data.type is string
+          && request.resource.data.type.size() > 0
+          && request.resource.data.type.size() <= 80
+          && validParticipant(request.resource.data.actor)
+          && request.resource.data.payload is map;
+        allow update, delete: if false;
+      }
+    }
+  }
+}
