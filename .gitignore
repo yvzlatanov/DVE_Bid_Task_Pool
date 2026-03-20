@@ -8,9 +8,11 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.netlify
 dist
 dist-ssr
 *.local
+deno.lock
 .env
 .env.*.local
 

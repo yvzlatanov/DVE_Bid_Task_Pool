@@ -67,3 +67,12 @@ export type AuditEventDoc = {
   actor: Participant
   payload: Record<string, unknown>
 }
+
+/** Presence in a session (doc id === participant id). */
+export type SessionParticipantDoc = {
+  id: string
+  displayName: string
+  email: string
+  joinedAt: Timestamp
+  lastSeen: Timestamp
+}

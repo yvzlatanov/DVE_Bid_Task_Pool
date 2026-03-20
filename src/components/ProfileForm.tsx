@@ -24,11 +24,7 @@ export function ProfileForm({ initial, onSaved, submitLabel = 'Save profile' }: 
       setError('Enter a valid email.')
       return
     }
-    const p = saveParticipant({
-      id: initial?.id,
-      displayName,
-      email,
-    })
+    const p = saveParticipant({ displayName, email })
     onSaved(p)
   }
 

@@ -73,6 +73,26 @@ service cloud.firestore {
             && validParticipant(request.resource.data.createdBy);
           allow update, delete: if false;
         }
+
+        match /participants/{participantId} {
+          allow read: if true;
+          allow create: if participantId == request.resource.data.id
+            && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
+            && request.resource.data.id is string
+            && request.resource.data.displayName is string
+            && request.resource.data.displayName.size() > 0
+            && request.resource.data.displayName.size() <= 200
+            && request.resource.data.email is string
+            && request.resource.data.email.size() <= 320;
+          allow update: if resource != null
+            && participantId == request.resource.data.id
+            && request.resource.data.id == resource.data.id
+            && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
+            && request.resource.data.displayName is string
+            && request.resource.data.displayName.size() > 0
+            && request.resource.data.email is string;
+          allow delete: if false;
+        }
       }
 
       match /audit/{eventId} {

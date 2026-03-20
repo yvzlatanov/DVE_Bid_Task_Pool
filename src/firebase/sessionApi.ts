@@ -1,10 +1,8 @@
 import {
   addDoc,
-  arrayUnion,
   collection,
   doc,
   getDoc,
-  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -15,11 +13,13 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore'
 import { getDownloadURL, ref, uploadBytes, type FirebaseStorage } from 'firebase/storage'
+import { normalizeEmail } from '../lib/participant'
 import type {
   AuditEventType,
   CommentDoc,
   Participant,
   SessionDoc,
+  SessionParticipantDoc,
   TaskDoc,
   TaskLink,
   TaskPriority,
@@ -36,6 +36,10 @@ function tasksCollection(db: Firestore, sessionId: string) {
 
 function commentsCollection(db: Firestore, sessionId: string, taskId: string) {
   return collection(db, 'sessions', sessionId, 'tasks', taskId, 'comments')
+}
+
+function participantsCollection(db: Firestore, sessionId: string) {
+  return collection(db, 'sessions', sessionId, 'participants')
 }
 
 export async function appendAudit(
@@ -117,6 +121,42 @@ export function subscribeTasks(
     },
     (err) => onError?.(err)
   )
+}
+
+export function subscribeParticipants(
+  db: Firestore,
+  sessionId: string,
+  onData: (list: { id: string; data: SessionParticipantDoc }[]) => void,
+  onError?: (e: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    participantsCollection(db, sessionId),
+    (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, data: d.data() as SessionParticipantDoc }))
+      onData(list)
+    },
+    (err) => onError?.(err)
+  )
+}
+
+/** Heartbeat so others see you in the session roster. Call on mount and on an interval. */
+export async function upsertSessionPresence(
+  db: Firestore,
+  sessionId: string,
+  participant: Participant
+) {
+  const pref = doc(participantsCollection(db, sessionId), participant.id)
+  const snap = await getDoc(pref)
+  const base: Record<string, unknown> = {
+    id: participant.id,
+    displayName: participant.displayName,
+    email: participant.email,
+    lastSeen: serverTimestamp(),
+  }
+  if (!snap.exists()) {
+    base.joinedAt = serverTimestamp()
+  }
+  await setDoc(pref, base, { merge: true })
 }
 
 export function subscribeComments(
@@ -206,10 +246,14 @@ export async function claimTask(
   if (!snap.exists()) throw new Error('Task not found')
   const data = snap.data() as TaskDoc
   if (data.status === 'done') throw new Error('Cannot claim a completed task')
+  const actorEm = normalizeEmail(actor.email)
+  const assignees = (data.assignees ?? []).filter((a) => normalizeEmail(a.email) !== actorEm)
+  const assigneeIds = assignees.map((a) => a.id)
+  if (assigneeIds.includes(actor.id)) return
   const mini = { id: actor.id, displayName: actor.displayName, email: actor.email }
   await updateDoc(taskRef, {
-    assigneeIds: arrayUnion(actor.id),
-    assignees: arrayUnion(mini),
+    assigneeIds: [...assigneeIds, actor.id],
+    assignees: [...assignees, mini],
     status: 'in_progress',
     updatedAt: serverTimestamp(),
   })
@@ -226,8 +270,11 @@ export async function releaseTask(
   const snap = await getDoc(taskRef)
   if (!snap.exists()) throw new Error('Task not found')
   const data = snap.data() as TaskDoc
-  const assigneeIds = (data.assigneeIds ?? []).filter((id) => id !== actor.id)
-  const assignees = (data.assignees ?? []).filter((a) => a.id !== actor.id)
+  const actorEm = normalizeEmail(actor.email)
+  const assignees = (data.assignees ?? []).filter(
+    (a) => a.id !== actor.id && normalizeEmail(a.email) !== actorEm
+  )
+  const assigneeIds = assignees.map((a) => a.id)
   let status = data.status
   if (status !== 'done' && assigneeIds.length === 0) {
     status = 'pooled'
@@ -294,49 +341,4 @@ export async function uploadTaskAttachment(
     fileName: file.name,
   })
   return getDownloadURL(sref)
-}
-
-function serializeValue(v: unknown): unknown {
-  if (v === null || v === undefined) return v
-  if (typeof v === 'object' && v !== null && 'toDate' in v && typeof (v as { toDate: () => Date }).toDate === 'function') {
-    return (v as { toDate: () => Date }).toDate().toISOString()
-  }
-  if (Array.isArray(v)) return v.map(serializeValue)
-  if (typeof v === 'object') {
-    const o = v as Record<string, unknown>
-    return Object.fromEntries(Object.entries(o).map(([k, val]) => [k, serializeValue(val)]))
-  }
-  return v
-}
-
-export async function exportSessionSnapshot(db: Firestore, sessionId: string) {
-  const sessionSnap = await getDoc(doc(db, 'sessions', sessionId))
-  const session = sessionSnap.exists() ? serializeValue(sessionSnap.data()) : null
-  const tasksSnap = await getDocs(query(tasksCollection(db, sessionId), orderBy('createdAt', 'desc')))
-  const tasks: unknown[] = []
-  for (const t of tasksSnap.docs) {
-    const commentsSnap = await getDocs(
-      query(commentsCollection(db, sessionId, t.id), orderBy('createdAt', 'asc'))
-    )
-    tasks.push({
-      id: t.id,
-      ...((serializeValue(t.data()) as object) ?? {}),
-      comments: commentsSnap.docs.map((d) => ({
-        id: d.id,
-        ...((serializeValue(d.data()) as object) ?? {}),
-      })),
-    })
-  }
-  const auditSnap = await getDocs(query(auditCollection(db, sessionId), orderBy('at', 'asc')))
-  const audit = auditSnap.docs.map((d) => ({
-    id: d.id,
-    ...((serializeValue(d.data()) as object) ?? {}),
-  }))
-  return {
-    exportedAt: new Date().toISOString(),
-    sessionId,
-    session,
-    tasks,
-    audit,
-  }
 }

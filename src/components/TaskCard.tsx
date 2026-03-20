@@ -1,3 +1,4 @@
+import { uniqueAssigneesByEmail } from '../lib/participant'
 import type { TaskDoc } from '../lib/types'
 import { PriorityBadge } from './PriorityBadge'
 
@@ -8,7 +9,9 @@ type Props = {
 
 export function TaskCard({ task, onOpen }: Props) {
   const { data } = task
-  const names = (data.assignees ?? []).map((a) => a.displayName).join(', ')
+  const assignees = uniqueAssigneesByEmail(data.assignees ?? [])
+  const names = assignees.map((a) => a.displayName).join(', ')
+  const assigneeCount = assignees.length
   const linkCount = data.links?.length ?? 0
   const attCount = data.attachments?.length ?? 0
 
@@ -26,7 +29,13 @@ export function TaskCard({ task, onOpen }: Props) {
         <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-zinc-600">{data.description}</p>
       ) : null}
       <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
-        {names ? <span>Working: {names}</span> : <span>In the pool</span>}
+        {names ? (
+          <span>
+            {assigneeCount > 1 ? `${assigneeCount} people: ${names}` : `Working: ${names}`}
+          </span>
+        ) : (
+          <span>In the pool</span>
+        )}
         {linkCount > 0 ? <span>{linkCount} link{linkCount === 1 ? '' : 's'}</span> : null}
         {attCount > 0 ? <span>{attCount} file{attCount === 1 ? '' : 's'}</span> : null}
       </div>

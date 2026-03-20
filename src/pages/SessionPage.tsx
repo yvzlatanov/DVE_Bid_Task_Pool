@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { CreateTaskModal } from '../components/CreateTaskModal'
+import { PeoplePanel } from '../components/PeoplePanel'
 import { ProfileForm } from '../components/ProfileForm'
 import { TaskCard } from '../components/TaskCard'
 import { TaskDetailModal } from '../components/TaskDetailModal'
 import { getDb } from '../firebase/app'
 import {
   archiveSession,
-  exportSessionSnapshot,
+  subscribeParticipants,
   subscribeSession,
   subscribeTasks,
+  upsertSessionPresence,
 } from '../firebase/sessionApi'
-import { getParticipant } from '../lib/participant'
-import type { Participant, SessionDoc, TaskDoc, TaskStatus } from '../lib/types'
+import { recordParticipatedSession } from '../lib/mySessions'
+import { getParticipant, normalizeEmail } from '../lib/participant'
+import type { Participant, SessionDoc, SessionParticipantDoc, TaskDoc, TaskStatus } from '../lib/types'
 
 const COLUMNS: { status: TaskStatus; label: string; hint: string }[] = [
   { status: 'pooled', label: 'Pool', hint: 'Unclaimed work' },
-  { status: 'in_progress', label: 'In progress', hint: 'Someone is on it' },
+  { status: 'in_progress', label: 'In progress', hint: 'One or more people' },
   { status: 'blocked', label: 'Blocked', hint: 'Needs attention' },
   { status: 'done', label: 'Done', hint: 'Completed' },
 ]
@@ -34,9 +37,10 @@ export function SessionPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
-  const [exportBusy, setExportBusy] = useState(false)
   const [archiveBusy, setArchiveBusy] = useState(false)
   const [banner, setBanner] = useState<string | null>(null)
+  const [peopleOpen, setPeopleOpen] = useState(false)
+  const [participants, setParticipants] = useState<{ id: string; data: SessionParticipantDoc }[]>([])
 
   const sid = sessionId ?? ''
 
@@ -69,6 +73,41 @@ export function SessionPage() {
     )
   }, [db, sid])
 
+  useEffect(() => {
+    if (!db || !sid) return
+    return subscribeParticipants(db, sid, setParticipants)
+  }, [db, sid])
+
+  // List users as soon as they have a profile on this URL (including while session doc is still loading).
+  useEffect(() => {
+    if (!db || !sid || !participant) return
+    void upsertSessionPresence(db, sid, participant)
+  }, [db, sid, participant])
+
+  useEffect(() => {
+    if (!db || !sid || !participant || !session) return
+    const t = window.setInterval(() => {
+      void upsertSessionPresence(db, sid, participant)
+    }, 20_000)
+    return () => window.clearInterval(t)
+  }, [db, sid, participant, session])
+
+  useEffect(() => {
+    if (!db || !sid || !participant) return
+    function onVisible() {
+      if (document.visibilityState === 'visible' && db && sid && participant) {
+        void upsertSessionPresence(db, sid, participant)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [db, sid, participant])
+
+  useEffect(() => {
+    if (!session || !participant || !sid) return
+    recordParticipatedSession(participant, sid, session.title)
+  }, [session, participant, sid])
+
   const copyLink = useCallback(() => {
     const url = `${window.location.origin}/session/${sid}`
     void navigator.clipboard.writeText(url).then(
@@ -79,27 +118,6 @@ export function SessionPage() {
       () => setBanner('Could not copy link. Copy from the address bar.')
     )
   }, [sid])
-
-  const handleExport = useCallback(async () => {
-    if (!db || !sid) return
-    setExportBusy(true)
-    try {
-      const data = await exportSessionSnapshot(db, sid)
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-      const href = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = href
-      a.download = `bid-session-${sid}.json`
-      a.click()
-      URL.revokeObjectURL(href)
-      setBanner('Export downloaded.')
-      setTimeout(() => setBanner(null), 3200)
-    } catch {
-      setBanner('Export failed. Check your connection and rules.')
-    } finally {
-      setExportBusy(false)
-    }
-  }, [db, sid])
 
   const handleArchive = useCallback(async () => {
     if (!db || !sid || !participant) return
@@ -127,7 +145,13 @@ export function SessionPage() {
             Enter your name and email so teammates can see who is on each task.
           </p>
           <div className="mt-6">
-            <ProfileForm submitLabel="Continue" onSaved={setParticipant} />
+            <ProfileForm
+              submitLabel="Continue"
+              onSaved={(p) => {
+                setParticipant(p)
+                if (db && sid) void upsertSessionPresence(db, sid, p)
+              }}
+            />
           </div>
           <p className="mt-6 text-center text-sm">
             <Link to="/" className="font-medium text-zinc-700 underline-offset-4 hover:underline">
@@ -180,6 +204,9 @@ export function SessionPage() {
   }
 
   const archived = session.status === 'archived'
+  const isSessionCreator =
+    participant.id === session.createdBy.id ||
+    normalizeEmail(participant.email) === normalizeEmail(session.createdBy.email ?? '')
   const selectedTask = selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) : undefined
 
   return (
@@ -199,20 +226,19 @@ export function SessionPage() {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
+              onClick={() => setPeopleOpen(true)}
+              className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50"
+            >
+              People
+            </button>
+            <button
+              type="button"
               onClick={copyLink}
               className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50"
             >
               Copy link
             </button>
-            <button
-              type="button"
-              onClick={handleExport}
-              disabled={exportBusy}
-              className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50 disabled:opacity-50"
-            >
-              {exportBusy ? 'Exporting…' : 'Export JSON'}
-            </button>
-            {!archived ? (
+            {!archived && isSessionCreator ? (
               <button
                 type="button"
                 onClick={handleArchive}
@@ -304,6 +330,13 @@ export function SessionPage() {
           onClose={() => setSelectedTaskId(null)}
         />
       ) : null}
+
+      <PeoplePanel
+        open={peopleOpen}
+        onClose={() => setPeopleOpen(false)}
+        participants={participants}
+        tasks={tasks}
+      />
     </div>
   )
 }

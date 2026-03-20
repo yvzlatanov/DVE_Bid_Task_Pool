@@ -2,7 +2,14 @@
   command = "npm run build"
   publish = "dist"
 
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
+# Netlify Dev must NOT apply the SPA rewrite at the proxy layer — it turns
+# /@vite/client, /src/*.tsx, etc. into index.html (empty MIME → module errors).
+# Production routing comes from public/_redirects (copied into dist on build).
+# Here we point [dev].publish at an empty folder so Dev has no _redirects/rules
+# to apply; deep links go straight to Vite, which serves SPA fallback itself.
+#
+# Run: npm run netlify:dev  → open http://localhost:8888
+[dev]
+  command = "npm run dev"
+  targetPort = 5173
+  publish = "dev-publish"

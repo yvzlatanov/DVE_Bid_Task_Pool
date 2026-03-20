@@ -1,13 +1,25 @@
-import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { doc, getDoc } from 'firebase/firestore'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ProfileForm } from '../components/ProfileForm'
 import { getDb } from '../firebase/app'
 import { createSession } from '../firebase/sessionApi'
+import {
+  getCreatedSessionsForParticipant,
+  getJoinedSessionsForHome,
+  recordCreatedSession,
+  recordParticipatedSession,
+  removeCreatedSession,
+  removeParticipatedSession,
+} from '../lib/mySessions'
 import { getParticipant } from '../lib/participant'
-import type { Participant } from '../lib/types'
+import type { Participant, SessionDoc } from '../lib/types'
+
+type SessionListRow = { sessionId: string; title: string; archived: boolean; missing: boolean }
 
 export function HomePage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const db = useMemo(() => getDb(), [])
   const [participant, setParticipant] = useState<Participant | null>(() => getParticipant())
   const [title, setTitle] = useState('')
@@ -15,6 +27,62 @@ export function HomePage() {
   const [busy, setBusy] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [editingProfile, setEditingProfile] = useState(false)
+  const [createdRows, setCreatedRows] = useState<SessionListRow[]>([])
+  const [joinedRows, setJoinedRows] = useState<SessionListRow[]>([])
+  const [listsLoading, setListsLoading] = useState(false)
+
+  useEffect(() => {
+    if (!db || !participant) {
+      setCreatedRows([])
+      setJoinedRows([])
+      return
+    }
+    const createdEntries = getCreatedSessionsForParticipant(participant)
+    const joinedEntries = getJoinedSessionsForHome(participant)
+    if (createdEntries.length === 0 && joinedEntries.length === 0) {
+      setCreatedRows([])
+      setJoinedRows([])
+      return
+    }
+    let cancelled = false
+    setListsLoading(true)
+    async function toRows(
+      firestore: NonNullable<typeof db>,
+      entries: { sessionId: string; title: string }[]
+    ): Promise<SessionListRow[]> {
+      return Promise.all(
+        entries.map(async (e) => {
+          try {
+            const snap = await getDoc(doc(firestore, 'sessions', e.sessionId))
+            if (!snap.exists()) {
+              return { sessionId: e.sessionId, title: e.title, archived: false, missing: true }
+            }
+            const s = snap.data() as SessionDoc
+            return {
+              sessionId: e.sessionId,
+              title: s.title || e.title,
+              archived: s.status === 'archived',
+              missing: false,
+            }
+          } catch {
+            return { sessionId: e.sessionId, title: e.title, archived: false, missing: true }
+          }
+        })
+      )
+    }
+    const firestore = db
+    void (async () => {
+      const [cr, jr] = await Promise.all([toRows(firestore, createdEntries), toRows(firestore, joinedEntries)])
+      if (!cancelled) {
+        setCreatedRows(cr)
+        setJoinedRows(jr)
+        setListsLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [db, participant, location.pathname])
 
   async function handleCreateSession(e: React.FormEvent) {
     e.preventDefault()
@@ -28,6 +96,8 @@ export function HomePage() {
     try {
       const sessionId = crypto.randomUUID()
       await createSession(db, sessionId, { title, bidLabel }, participant)
+      recordCreatedSession(participant, sessionId, title.trim())
+      recordParticipatedSession(participant, sessionId, title.trim())
       navigate(`/session/${sessionId}`)
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Could not create session.')
@@ -52,7 +122,8 @@ export function HomePage() {
           <section className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
             <h2 className="text-base font-semibold">Your profile</h2>
             <p className="mt-1 text-sm text-zinc-600">
-              Enter how you appear in sessions. This stays on this device for refreshes and returns.
+              Your email identifies you across browsers and visits (same email = same person on tasks). This device
+              remembers your profile for next time.
             </p>
             <div className="mt-6">
               <ProfileForm onSaved={setParticipant} />
@@ -104,6 +175,104 @@ export function HomePage() {
 
             {!editingProfile ? (
               <>
+                {getCreatedSessionsForParticipant(participant).length > 0 ? (
+                  <section className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
+                    <h2 className="text-base font-semibold">Sessions you started</h2>
+                    <p className="mt-1 text-sm text-zinc-600">
+                      Stored on this device (including archived). Open to continue or share the link from the session.
+                    </p>
+                    {listsLoading ? (
+                      <p className="mt-4 text-sm text-zinc-500">Loading…</p>
+                    ) : (
+                      <ul className="mt-4 divide-y divide-zinc-100">
+                        {createdRows.map((row) => (
+                          <li key={row.sessionId} className="flex flex-wrap items-center justify-between gap-2 py-3">
+                            <div className="min-w-0">
+                              <p className="font-medium text-zinc-900">{row.title}</p>
+                              <p className="text-xs text-zinc-500">
+                                {row.missing
+                                  ? 'Not found (removed or no access)'
+                                  : row.archived
+                                    ? 'Archived'
+                                    : 'Active'}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              {!row.missing ? (
+                                <Link
+                                  to={`/session/${row.sessionId}`}
+                                  className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-800"
+                                >
+                                  Open
+                                </Link>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  removeCreatedSession(row.sessionId)
+                                  setCreatedRows((prev) => prev.filter((r) => r.sessionId !== row.sessionId))
+                                }}
+                                className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                              >
+                                Remove from list
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+                ) : null}
+
+                {getJoinedSessionsForHome(participant).length > 0 ? (
+                  <section className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
+                    <h2 className="text-base font-semibold">Sessions you joined</h2>
+                    <p className="mt-1 text-sm text-zinc-600">
+                      Rooms you opened with this email (not ones you started yourself). Includes archived sessions.
+                    </p>
+                    {listsLoading ? (
+                      <p className="mt-4 text-sm text-zinc-500">Loading…</p>
+                    ) : (
+                      <ul className="mt-4 divide-y divide-zinc-100">
+                        {joinedRows.map((row) => (
+                          <li key={row.sessionId} className="flex flex-wrap items-center justify-between gap-2 py-3">
+                            <div className="min-w-0">
+                              <p className="font-medium text-zinc-900">{row.title}</p>
+                              <p className="text-xs text-zinc-500">
+                                {row.missing
+                                  ? 'Not found (removed or no access)'
+                                  : row.archived
+                                    ? 'Archived'
+                                    : 'Active'}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              {!row.missing ? (
+                                <Link
+                                  to={`/session/${row.sessionId}`}
+                                  className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-800"
+                                >
+                                  Open
+                                </Link>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  removeParticipatedSession(row.sessionId)
+                                  setJoinedRows((prev) => prev.filter((r) => r.sessionId !== row.sessionId))
+                                }}
+                                className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                              >
+                                Remove from list
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+                ) : null}
+
                 <section className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
                   <h2 className="text-base font-semibold">Start a bid session</h2>
                   <p className="mt-1 text-sm text-zinc-600">

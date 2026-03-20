@@ -9,6 +9,7 @@ import {
   updateTaskDetails,
   uploadTaskAttachment,
 } from '../firebase/sessionApi'
+import { normalizeEmail, uniqueAssigneesByEmail } from '../lib/participant'
 import type { CommentDoc, Participant, TaskDoc, TaskLink, TaskPriority, TaskStatus } from '../lib/types'
 import { PriorityBadge } from './PriorityBadge'
 
@@ -55,7 +56,11 @@ export function TaskDetailModal({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const isAssigned = (task.data.assigneeIds ?? []).includes(participant.id)
+  const isAssigned =
+    (task.data.assigneeIds ?? []).includes(participant.id) ||
+    (task.data.assignees ?? []).some(
+      (a) => normalizeEmail(a.email) === normalizeEmail(participant.email)
+    )
   const readOnly = sessionArchived
 
   useEffect(() => {
@@ -224,6 +229,13 @@ export function TaskDetailModal({
           {readOnly ? (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
               This session is archived. Editing and new uploads are disabled.
+            </p>
+          ) : null}
+
+          {!readOnly && task.data.status !== 'done' ? (
+            <p className="text-sm leading-relaxed text-zinc-600">
+              Several people can work on the same task. You can join with &quot;Work on this task&quot; even when it is
+              already in progress; each person can release independently.
             </p>
           ) : null}
 
@@ -405,7 +417,7 @@ export function TaskDetailModal({
           <section>
             <h3 className="text-sm font-semibold text-zinc-900">People on this task</h3>
             <ul className="mt-2 flex flex-wrap gap-2">
-              {(task.data.assignees ?? []).map((a) => (
+              {uniqueAssigneesByEmail(task.data.assignees ?? []).map((a) => (
                 <li
                   key={a.id}
                   className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-800"
@@ -413,7 +425,7 @@ export function TaskDetailModal({
                   {a.displayName}
                 </li>
               ))}
-              {!(task.data.assignees ?? []).length ? (
+              {!uniqueAssigneesByEmail(task.data.assignees ?? []).length ? (
                 <li className="text-sm text-zinc-500">No one has claimed this yet.</li>
               ) : null}
             </ul>
