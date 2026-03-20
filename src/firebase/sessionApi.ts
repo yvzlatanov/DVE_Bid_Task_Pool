@@ -3,6 +3,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -49,6 +50,51 @@ function subtaskCommentsCollection(
   subtaskId: string
 ) {
   return collection(db, 'sessions', sessionId, 'tasks', taskId, 'subtasks', subtaskId, 'comments')
+}
+
+/** When there is at least one subtask: parent is done iff all subtasks are done. */
+async function syncParentTaskStatusFromSubtasks(
+  db: Firestore,
+  sessionId: string,
+  taskId: string,
+  actor: Participant
+) {
+  const subsSnap = await getDocs(subtasksCollection(db, sessionId, taskId))
+  if (subsSnap.empty) return
+
+  const allDone = subsSnap.docs.every((d) => (d.data() as TaskDoc).status === 'done')
+  const taskRef = doc(db, 'sessions', sessionId, 'tasks', taskId)
+  const taskSnap = await getDoc(taskRef)
+  if (!taskSnap.exists()) return
+  const taskData = taskSnap.data() as TaskDoc
+
+  if (allDone) {
+    if (taskData.status !== 'done') {
+      await updateDoc(taskRef, {
+        status: 'done',
+        updatedAt: serverTimestamp(),
+      })
+      await appendAudit(db, sessionId, 'task_updated', actor, {
+        taskId,
+        patch: { status: 'done', syncedFromSubtasks: true },
+      })
+    }
+    return
+  }
+
+  if (taskData.status === 'done') {
+    const hasAssignees =
+      (taskData.assigneeIds?.length ?? 0) > 0 || (taskData.assignees?.length ?? 0) > 0
+    const next: TaskStatus = hasAssignees ? 'in_progress' : 'pooled'
+    await updateDoc(taskRef, {
+      status: next,
+      updatedAt: serverTimestamp(),
+    })
+    await appendAudit(db, sessionId, 'task_updated', actor, {
+      taskId,
+      patch: { status: next, syncedFromSubtasks: true },
+    })
+  }
 }
 
 function participantsCollection(db: Firestore, sessionId: string) {
@@ -407,6 +453,7 @@ export async function createSubtask(
     title: payload.title,
     priority: payload.priority,
   })
+  await syncParentTaskStatusFromSubtasks(db, sessionId, taskId, actor)
   return subRef.id
 }
 
@@ -433,6 +480,7 @@ export async function updateSubtaskDetails(
   if (patch.links !== undefined) clean.links = patch.links.filter((l) => l.url.trim())
   await updateDoc(subRef, clean)
   await appendAudit(db, sessionId, 'subtask_updated', actor, { taskId, subtaskId, patch })
+  await syncParentTaskStatusFromSubtasks(db, sessionId, taskId, actor)
 }
 
 export async function claimSubtask(
