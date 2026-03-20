@@ -19,6 +19,7 @@ export function CreateSubtaskModal({ open, onClose, sessionId, taskId, participa
   const [description, setDescription] = useState('')
   const [priority, setPriority] = useState<TaskPriority>('medium')
   const [links, setLinks] = useState<TaskLink[]>([{ url: '', label: '' }])
+  const [tagsInput, setTagsInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -29,6 +30,7 @@ export function CreateSubtaskModal({ open, onClose, sessionId, taskId, participa
     setDescription('')
     setPriority('medium')
     setLinks([{ url: '', label: '' }])
+    setTagsInput('')
     setError(null)
   }
 
@@ -47,6 +49,10 @@ export function CreateSubtaskModal({ open, onClose, sessionId, taskId, participa
     }
     setBusy(true)
     try {
+      const tags = tagsInput
+        .split(/[,;\n]+/)
+        .map((t) => t.trim())
+        .filter(Boolean)
       await createSubtask(
         db,
         sessionId,
@@ -55,6 +61,7 @@ export function CreateSubtaskModal({ open, onClose, sessionId, taskId, participa
           title,
           description,
           priority,
+          tags,
           links: links
             .map((l) => ({ url: l.url.trim(), label: l.label?.trim() || undefined }))
             .filter((l) => l.url.length > 0),
@@ -110,6 +117,18 @@ export function CreateSubtaskModal({ open, onClose, sessionId, taskId, participa
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={4}
+              className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-400"
+            />
+          </div>
+          <div>
+            <label htmlFor="subtask-tags" className="block text-sm font-medium text-zinc-700">
+              Tags (optional)
+            </label>
+            <input
+              id="subtask-tags"
+              value={tagsInput}
+              onChange={(e) => setTagsInput(e.target.value)}
+              placeholder="Comma-separated"
               className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-400"
             />
           </div>

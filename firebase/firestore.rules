@@ -1,6 +1,65 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function sessionPath(sessionId) {
+      return /databases/$(database)/documents/sessions/$(sessionId);
+    }
+
+    function sessionGet(sessionId) {
+      return get(sessionPath(sessionId)).data;
+    }
+
+    function memberPath(sessionId) {
+      return /databases/$(database)/documents/sessions/$(sessionId)/members/$(request.auth.uid);
+    }
+
+    function isMember(sessionId) {
+      return signedIn() && exists(memberPath(sessionId));
+    }
+
+    function memberRole(sessionId) {
+      return get(memberPath(sessionId)).data.role;
+    }
+
+    function isAdmin(sessionId) {
+      return isMember(sessionId) && memberRole(sessionId) == 'admin';
+    }
+
+    function isEditor(sessionId) {
+      return isMember(sessionId) && (memberRole(sessionId) == 'editor' || memberRole(sessionId) == 'admin');
+    }
+
+    function accessModeOrDefault(sessionId) {
+      let s = sessionGet(sessionId);
+      return 'accessMode' in s ? s.accessMode : 'link_join';
+    }
+
+    function linkNotExpired(sessionId) {
+      let s = sessionGet(sessionId);
+      return !('linkExpiresAt' in s)
+        || s.linkExpiresAt == null
+        || request.time < s.linkExpiresAt;
+    }
+
+    function sessionLinkJoinOpen(sessionId) {
+      return signedIn()
+        && accessModeOrDefault(sessionId) == 'link_join'
+        && linkNotExpired(sessionId);
+    }
+
+    function canReadSessionTree(sessionId) {
+      return isMember(sessionId) || sessionLinkJoinOpen(sessionId);
+    }
+
+    function sessionActive(sessionId) {
+      return sessionGet(sessionId).status == 'active';
+    }
+
     function validParticipant(p) {
       return p is map
         && p.keys().hasAll(['id', 'displayName', 'email'])
@@ -12,64 +71,139 @@ service cloud.firestore {
         && p.email.size() <= 320;
     }
 
-    match /sessions/{sessionId} {
-      allow read: if true;
+    function validActorParticipant(p) {
+      return validParticipant(p)
+        && p.id == request.auth.uid
+        && (request.auth.token.email == null || p.email == request.auth.token.email);
+    }
 
-      allow create: if request.resource.data.keys().hasAll([
-            'title',
-            'bidLabel',
-            'status',
-            'createdAt',
-            'createdBy'
-          ])
+    function validTags(tags) {
+      return tags is list && tags.size() <= 20;
+    }
+
+    function taskCreateFields() {
+      return [
+        'title',
+        'description',
+        'priority',
+        'status',
+        'assigneeIds',
+        'assignees',
+        'links',
+        'attachments',
+        'tags',
+        'createdAt',
+        'updatedAt',
+        'createdBy'
+      ];
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if canReadSessionTree(sessionId);
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'title',
+          'bidLabel',
+          'status',
+          'createdAt',
+          'createdBy',
+          'accessMode'
+        ])
         && request.resource.data.title is string
         && request.resource.data.title.size() <= 300
         && request.resource.data.bidLabel is string
         && request.resource.data.bidLabel.size() <= 300
         && request.resource.data.status == 'active'
-        && validParticipant(request.resource.data.createdBy);
+        && request.resource.data.accessMode in ['link_join', 'invite_only']
+        && validActorParticipant(request.resource.data.createdBy)
+        && request.resource.data.createdBy.id == request.auth.uid
+        && (!request.resource.data.keys().hasAny(['linkExpiresAt'])
+          || request.resource.data.linkExpiresAt == null
+          || request.resource.data.linkExpiresAt is timestamp);
 
-      allow update: if resource != null
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
-        && request.resource.data.status in ['active', 'archived'];
+      allow update: if signedIn() && isAdmin(sessionId)
+        && (
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+            && resource.data.status == 'active'
+            && request.resource.data.status == 'archived'
+          )
+          || (
+            resource.data.status == 'active'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accessMode', 'linkExpiresAt'])
+            && request.resource.data.accessMode in ['link_join', 'invite_only']
+            && (!request.resource.data.keys().hasAny(['linkExpiresAt'])
+              || request.resource.data.linkExpiresAt == null
+              || request.resource.data.linkExpiresAt is timestamp)
+          )
+          || (
+            resource.data.status == 'active'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accessMode'])
+            && request.resource.data.accessMode in ['link_join', 'invite_only']
+          )
+          || (
+            resource.data.status == 'active'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['linkExpiresAt'])
+            && (!request.resource.data.keys().hasAny(['linkExpiresAt'])
+              || request.resource.data.linkExpiresAt == null
+              || request.resource.data.linkExpiresAt is timestamp)
+          )
+        );
 
       allow delete: if false;
 
-      match /participants/{participantId} {
-        allow read: if true;
-        allow create: if participantId == request.resource.data.id
-          && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
-          && request.resource.data.id is string
-          && request.resource.data.displayName is string
-          && request.resource.data.displayName.size() > 0
-          && request.resource.data.displayName.size() <= 200
+      match /members/{memberId} {
+        allow read: if canReadSessionTree(sessionId);
+
+        allow create: if signedIn()
+          && memberId == request.auth.uid
+          && request.resource.data.keys().hasAll(['role', 'email', 'displayName', 'joinedAt'])
           && request.resource.data.email is string
-          && request.resource.data.email.size() <= 320;
-        allow update: if resource != null
-          && participantId == request.resource.data.id
-          && request.resource.data.id == resource.data.id
-          && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
           && request.resource.data.displayName is string
           && request.resource.data.displayName.size() > 0
-          && request.resource.data.email is string;
+          && request.resource.data.joinedAt is timestamp
+          && (
+            (
+              request.resource.data.role == 'admin'
+              && get(sessionPath(sessionId)).data.createdBy.id == request.auth.uid
+            )
+            || (
+              request.resource.data.role == 'editor'
+              && sessionLinkJoinOpen(sessionId)
+              && !exists(memberPath(sessionId))
+            )
+          );
+
+        allow update, delete: if false;
+      }
+
+      match /invites/{inviteId} {
+        allow read, write: if false;
+      }
+
+      match /participants/{participantId} {
+        allow read: if canReadSessionTree(sessionId);
+        allow create: if signedIn()
+          && participantId == request.auth.uid
+          && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
+          && request.resource.data.id == request.auth.uid
+          && validActorParticipant(request.resource.data);
+        allow update: if signedIn()
+          && participantId == request.auth.uid
+          && request.resource.data.id == request.auth.uid
+          && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
+          && validActorParticipant(request.resource.data);
         allow delete: if false;
       }
 
       match /tasks/{taskId} {
-        allow read: if true;
-        allow create: if request.resource.data.keys().hasAll([
-              'title',
-              'description',
-              'priority',
-              'status',
-              'assigneeIds',
-              'assignees',
-              'links',
-              'attachments',
-              'createdAt',
-              'updatedAt',
-              'createdBy'
-            ])
+        allow read: if canReadSessionTree(sessionId);
+
+        allow create: if signedIn()
+          && isEditor(sessionId)
+          && sessionActive(sessionId)
+          && request.resource.data.keys().hasAll(taskCreateFields())
           && request.resource.data.title is string
           && request.resource.data.title.size() <= 400
           && request.resource.data.description is string
@@ -80,35 +214,35 @@ service cloud.firestore {
           && request.resource.data.assignees is list
           && request.resource.data.links is list
           && request.resource.data.attachments is list
-          && validParticipant(request.resource.data.createdBy);
-        allow update: if resource != null;
+          && validTags(request.resource.data.tags)
+          && validActorParticipant(request.resource.data.createdBy);
+
+        allow update: if signedIn()
+          && isEditor(sessionId)
+          && sessionActive(sessionId)
+          && resource != null;
+
         allow delete: if false;
 
         match /comments/{commentId} {
-          allow read: if true;
-          allow create: if request.resource.data.keys().hasAll(['text', 'createdAt', 'createdBy'])
+          allow read: if canReadSessionTree(sessionId);
+          allow create: if signedIn()
+            && isEditor(sessionId)
+            && sessionActive(sessionId)
+            && request.resource.data.keys().hasAll(['text', 'createdAt', 'createdBy'])
             && request.resource.data.text is string
             && request.resource.data.text.size() > 0
             && request.resource.data.text.size() <= 8000
-            && validParticipant(request.resource.data.createdBy);
+            && validActorParticipant(request.resource.data.createdBy);
           allow update, delete: if false;
         }
 
         match /subtasks/{subtaskId} {
-          allow read: if true;
-          allow create: if request.resource.data.keys().hasAll([
-                'title',
-                'description',
-                'priority',
-                'status',
-                'assigneeIds',
-                'assignees',
-                'links',
-                'attachments',
-                'createdAt',
-                'updatedAt',
-                'createdBy'
-              ])
+          allow read: if canReadSessionTree(sessionId);
+          allow create: if signedIn()
+            && isEditor(sessionId)
+            && sessionActive(sessionId)
+            && request.resource.data.keys().hasAll(taskCreateFields())
             && request.resource.data.title is string
             && request.resource.data.title.size() <= 400
             && request.resource.data.description is string
@@ -119,29 +253,38 @@ service cloud.firestore {
             && request.resource.data.assignees is list
             && request.resource.data.links is list
             && request.resource.data.attachments is list
-            && validParticipant(request.resource.data.createdBy);
-          allow update: if resource != null;
+            && validTags(request.resource.data.tags)
+            && validActorParticipant(request.resource.data.createdBy);
+          allow update: if signedIn()
+            && isEditor(sessionId)
+            && sessionActive(sessionId)
+            && resource != null;
           allow delete: if false;
 
           match /comments/{subCommentId} {
-            allow read: if true;
-            allow create: if request.resource.data.keys().hasAll(['text', 'createdAt', 'createdBy'])
+            allow read: if canReadSessionTree(sessionId);
+            allow create: if signedIn()
+              && isEditor(sessionId)
+              && sessionActive(sessionId)
+              && request.resource.data.keys().hasAll(['text', 'createdAt', 'createdBy'])
               && request.resource.data.text is string
               && request.resource.data.text.size() > 0
               && request.resource.data.text.size() <= 8000
-              && validParticipant(request.resource.data.createdBy);
+              && validActorParticipant(request.resource.data.createdBy);
             allow update, delete: if false;
           }
         }
       }
 
       match /audit/{eventId} {
-        allow read: if true;
-        allow create: if request.resource.data.keys().hasAll(['type', 'at', 'actor', 'payload'])
+        allow read: if canReadSessionTree(sessionId);
+        allow create: if signedIn()
+          && isEditor(sessionId)
+          && request.resource.data.keys().hasAll(['type', 'at', 'actor', 'payload'])
           && request.resource.data.type is string
           && request.resource.data.type.size() > 0
           && request.resource.data.type.size() <= 80
-          && validParticipant(request.resource.data.actor)
+          && validActorParticipant(request.resource.data.actor)
           && request.resource.data.payload is map;
         allow update, delete: if false;
       }

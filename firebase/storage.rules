@@ -1,17 +1,63 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
+
+    function sessionDocPath(sessionId) {
+      return /databases/(default)/documents/sessions/$(sessionId);
+    }
+
+    function isMemberStorage(sessionId) {
+      return request.auth != null
+        && firestore.exists(
+          /databases/(default)/documents/sessions/$(sessionId)/members/$(request.auth.uid)
+        );
+    }
+
+    function linkJoinOpenStorage(sessionId) {
+      return request.auth != null
+        && firestore.exists(sessionDocPath(sessionId))
+        && (
+          !('accessMode' in firestore.get(sessionDocPath(sessionId)).data)
+          || firestore.get(sessionDocPath(sessionId)).data.accessMode == 'link_join'
+        )
+        && (
+          !('linkExpiresAt' in firestore.get(sessionDocPath(sessionId)).data)
+          || firestore.get(sessionDocPath(sessionId)).data.linkExpiresAt == null
+          || request.time < firestore.get(sessionDocPath(sessionId)).data.linkExpiresAt
+        );
+    }
+
+    function canAccessSessionStorage(sessionId) {
+      return isMemberStorage(sessionId) || linkJoinOpenStorage(sessionId);
+    }
+
+    function sessionActiveStorage(sessionId) {
+      return firestore.get(sessionDocPath(sessionId)).data.status == 'active';
+    }
+
+    function canWriteSessionStorage(sessionId) {
+      return canAccessSessionStorage(sessionId)
+        && sessionActiveStorage(sessionId)
+        && isMemberStorage(sessionId)
+        && (
+          firestore.get(/databases/(default)/documents/sessions/$(sessionId)/members/$(request.auth.uid)).data.role == 'admin'
+          || firestore.get(/databases/(default)/documents/sessions/$(sessionId)/members/$(request.auth.uid)).data.role == 'editor'
+        );
+    }
+
     match /sessions/{sessionId}/tasks/{taskId}/{fileName} {
-      allow read: if true;
-      allow write: if fileName.size() > 0
+      allow read: if canAccessSessionStorage(sessionId);
+      allow write: if canWriteSessionStorage(sessionId)
+        && fileName.size() > 0
         && fileName.size() < 500
         && request.resource != null
         && request.resource.size < 15 * 1024 * 1024;
     }
 
     match /sessions/{sessionId}/tasks/{taskId}/subtasks/{subtaskId}/{fileName} {
-      allow read: if true;
-      allow write: if fileName.size() > 0
+      allow read: if canAccessSessionStorage(sessionId);
+      allow write: if canWriteSessionStorage(sessionId)
+        && fileName.size() > 0
         && fileName.size() < 500
         && request.resource != null
         && request.resource.size < 15 * 1024 * 1024;

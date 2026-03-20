@@ -14,6 +14,7 @@ export function TaskCard({ task, onOpen }: Props) {
   const assigneeCount = assignees.length
   const linkCount = data.links?.length ?? 0
   const attCount = data.attachments?.length ?? 0
+  const tags = data.tags ?? []
 
   return (
     <button
@@ -27,6 +28,21 @@ export function TaskCard({ task, onOpen }: Props) {
       </div>
       {data.description ? (
         <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-zinc-600">{data.description}</p>
+      ) : null}
+      {tags.length ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {tags.slice(0, 5).map((t, i) => (
+            <span
+              key={`${t}-${i}`}
+              className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-700"
+            >
+              {t}
+            </span>
+          ))}
+          {tags.length > 5 ? (
+            <span className="text-[10px] text-zinc-500">+{tags.length - 5}</span>
+          ) : null}
+        </div>
       ) : null}
       <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
         {names ? (

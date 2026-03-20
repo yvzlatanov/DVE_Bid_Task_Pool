@@ -1,12 +1,13 @@
 import { doc, onSnapshot } from 'firebase/firestore'
 import { getDownloadURL, ref } from 'firebase/storage'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getDb, getFirebaseStorage } from '../firebase/app'
 import {
   addComment,
   addSubtaskComment,
   claimSubtask,
   claimTask,
+  ConflictError,
   releaseSubtask,
   releaseTask,
   subscribeComments,
@@ -31,6 +32,8 @@ type BaseProps = {
   onClose: () => void
   /** Stacked subtask modal uses a higher z-index. */
   stackZ?: string
+  /** Viewers cannot edit; default true. */
+  canEdit?: boolean
 }
 
 export type TaskDetailModalProps =
@@ -51,8 +54,15 @@ function formatTime(ts: { toDate?: () => Date } | undefined): string {
   }
 }
 
+function parseTagsInput(raw: string): string[] {
+  return raw
+    .split(/[,;\n]+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+}
+
 export function TaskDetailModal(props: TaskDetailModalProps) {
-  const { sessionId, participant, sessionArchived, onClose, stackZ = 'z-50' } = props
+  const { sessionId, participant, sessionArchived, onClose, stackZ = 'z-50', canEdit = true } = props
   const variant = props.variant
   const db = useMemo(() => getDb(), [])
   const storage = useMemo(() => getFirebaseStorage(), [])
@@ -80,19 +90,46 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
   const [links, setLinks] = useState<TaskLink[]>(
     itemData.links?.length ? itemData.links : [{ url: '', label: '' }]
   )
+  const [tagsInput, setTagsInput] = useState(() => (itemData.tags ?? []).join(', '))
   const [comments, setComments] = useState<{ id: string; data: CommentDoc }[]>([])
   const [commentText, setCommentText] = useState('')
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [nestedSubtask, setNestedSubtask] = useState<{ id: string; data: TaskDoc } | null>(null)
+  const [remoteConflict, setRemoteConflict] = useState(false)
+  const baselineUpdatedMs = useRef(-1)
+  const skipNextRemoteCheck = useRef(false)
 
   const isAssigned =
     (itemData.assigneeIds ?? []).includes(participant.id) ||
     (itemData.assignees ?? []).some(
       (a) => normalizeEmail(a.email) === normalizeEmail(participant.email)
     )
-  const readOnly = sessionArchived
+  const readOnly = sessionArchived || !canEdit
+
+  useEffect(() => {
+    const ms = itemData.updatedAt?.toMillis?.() ?? 0
+    if (baselineUpdatedMs.current < 0) {
+      baselineUpdatedMs.current = ms
+      setRemoteConflict(false)
+      return
+    }
+    if (skipNextRemoteCheck.current) {
+      skipNextRemoteCheck.current = false
+      baselineUpdatedMs.current = ms
+      return
+    }
+    if (ms !== baselineUpdatedMs.current) {
+      setRemoteConflict(true)
+    }
+  }, [itemData.updatedAt])
+
+  useEffect(() => {
+    baselineUpdatedMs.current = -1
+    skipNextRemoteCheck.current = false
+    setRemoteConflict(false)
+  }, [itemId])
 
   useEffect(() => {
     setTitle(itemData.title)
@@ -100,6 +137,7 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
     setPriority(itemData.priority)
     setStatus(itemData.status)
     setLinks(itemData.links?.length ? itemData.links : [{ url: '', label: '' }])
+    setTagsInput((itemData.tags ?? []).join(', '))
   }, [
     itemId,
     itemData.title,
@@ -107,6 +145,7 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
     itemData.priority,
     itemData.status,
     itemData.links,
+    itemData.tags,
   ])
 
   useEffect(() => {
@@ -150,6 +189,7 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
     if (!db || readOnly) return
     setError(null)
     setBusy(true)
+    setRemoteConflict(false)
     const patch = {
       title,
       description,
@@ -158,18 +198,44 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
       links: links
         .map((l) => ({ url: l.url.trim(), label: l.label?.trim() || undefined }))
         .filter((l) => l.url.length > 0),
+      tags: parseTagsInput(tagsInput),
     }
+    const expected = itemData.updatedAt
     try {
       if (variant === 'task') {
-        await updateTaskDetails(db, sessionId, itemId, patch, participant)
+        await updateTaskDetails(db, sessionId, itemId, patch, participant, expected ?? null)
       } else {
-        await updateSubtaskDetails(db, sessionId, parentTaskId, itemId, patch, participant)
+        await updateSubtaskDetails(db, sessionId, parentTaskId, itemId, patch, participant, expected ?? null)
       }
+      skipNextRemoteCheck.current = true
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save.')
+      if (err instanceof ConflictError) {
+        setError('Someone else saved changes first. Reload the form or save again to overwrite.')
+        setRemoteConflict(true)
+      } else {
+        setError(err instanceof Error ? err.message : 'Could not save.')
+      }
     } finally {
       setBusy(false)
     }
+  }
+
+  function reloadFormFromServer() {
+    setTitle(itemData.title)
+    setDescription(itemData.description)
+    setPriority(itemData.priority)
+    setStatus(itemData.status)
+    setLinks(itemData.links?.length ? itemData.links : [{ url: '', label: '' }])
+    setTagsInput((itemData.tags ?? []).join(', '))
+    baselineUpdatedMs.current = itemData.updatedAt?.toMillis?.() ?? 0
+    setRemoteConflict(false)
+    setError(null)
+  }
+
+  function acceptMyVersionBaseline() {
+    baselineUpdatedMs.current = itemData.updatedAt?.toMillis?.() ?? 0
+    setRemoteConflict(false)
+    setError(null)
   }
 
   async function handleClaim() {
@@ -287,8 +353,32 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
           <div className="space-y-6 px-5 py-5">
             {readOnly ? (
               <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
-                This session is archived. Editing and new uploads are disabled.
+                {sessionArchived
+                  ? 'This session is archived. Editing and new uploads are disabled.'
+                  : 'You have view-only access. Editing and uploads are disabled.'}
               </p>
+            ) : null}
+
+            {remoteConflict && !readOnly ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+                <p className="font-medium">This item was updated elsewhere.</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={reloadFormFromServer}
+                    className="rounded-md bg-white px-3 py-1 text-xs font-medium ring-1 ring-amber-300 hover:bg-amber-100"
+                  >
+                    Reload from server
+                  </button>
+                  <button
+                    type="button"
+                    onClick={acceptMyVersionBaseline}
+                    className="rounded-md bg-amber-900 px-3 py-1 text-xs font-medium text-white hover:bg-amber-800"
+                  >
+                    Keep my edits (save overwrites)
+                  </button>
+                </div>
+              </div>
             ) : null}
 
             {!readOnly && itemData.status !== 'done' ? (
@@ -392,6 +482,19 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
                     ))}
                   </select>
                 </div>
+              </div>
+              <div>
+                <label htmlFor="detail-tags" className="block text-xs font-medium text-zinc-600">
+                  Tags (comma-separated)
+                </label>
+                <input
+                  id="detail-tags"
+                  disabled={readOnly}
+                  value={tagsInput}
+                  onChange={(e) => setTagsInput(e.target.value)}
+                  placeholder="e.g. electrical, RFQ, urgent"
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-400 disabled:bg-zinc-50"
+                />
               </div>
               {!readOnly ? (
                 <button
@@ -539,6 +642,7 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
                 parentTaskId={props.task.id}
                 sessionArchived={sessionArchived}
                 participant={participant}
+                canEdit={canEdit}
                 onOpenSubtask={setNestedSubtask}
               />
             ) : null}
@@ -558,6 +662,7 @@ export function TaskDetailModal(props: TaskDetailModalProps) {
           subtask={nestedSubtask}
           participant={participant}
           sessionArchived={sessionArchived}
+          canEdit={canEdit}
           onClose={() => setNestedSubtask(null)}
           stackZ="z-[60]"
         />

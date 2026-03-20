@@ -17,6 +17,7 @@ type Props = {
   parentTaskId: string
   sessionArchived: boolean
   participant: Participant
+  canEdit?: boolean
   onOpenSubtask: (subtask: { id: string; data: TaskDoc }) => void
 }
 
@@ -25,6 +26,7 @@ export function SubtaskBoard({
   parentTaskId,
   sessionArchived,
   participant,
+  canEdit = true,
   onOpenSubtask,
 }: Props) {
   const db = useMemo(() => getDb(), [])
@@ -45,7 +47,7 @@ export function SubtaskBoard({
             Same workflow as the main board — pool through done, with full detail on each card.
           </p>
         </div>
-        {!sessionArchived ? (
+        {!sessionArchived && canEdit ? (
           <button
             type="button"
             onClick={() => setCreateOpen(true)}

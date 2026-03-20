@@ -1,14 +1,13 @@
+import type { User } from 'firebase/auth'
 import type { Participant } from './types'
 
-const STORAGE_KEY = 'bidtm_participant_v1'
-
-/** Normalized email for comparisons and stable IDs. */
+/** Normalized email for comparisons and stable IDs (legacy / display). */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase()
 }
 
 /**
- * One Firestore-safe id per email (same browser or not). Used as participant id everywhere.
+ * @deprecated Legacy email-hash id; new data uses Firebase Auth UID.
  */
 export function stableParticipantIdFromEmail(email: string): string {
   const n = normalizeEmail(email)
@@ -45,38 +44,15 @@ export function uniqueAssigneesByEmail<T extends { email: string }>(list: T[] | 
   return out
 }
 
-export function getParticipant(): Participant | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return null
-    const data = JSON.parse(raw) as Participant
-    if (!data?.displayName || !data?.email) return null
-    const id = stableParticipantIdFromEmail(data.email)
-    const participant: Participant = {
-      id,
-      displayName: data.displayName.trim(),
-      email: data.email.trim(),
-    }
-    if (data.id !== id) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(participant))
-    }
-    return participant
-  } catch {
-    return null
-  }
-}
-
-export function saveParticipant(input: { displayName: string; email: string }): Participant {
-  const email = input.email.trim()
-  const participant: Participant = {
-    id: stableParticipantIdFromEmail(email),
-    displayName: input.displayName.trim(),
+/** Build Participant from Firebase Auth user (id === uid). */
+export function participantFromUser(user: User): Participant {
+  const email = user.email ?? ''
+  const displayName =
+    user.displayName?.trim() ||
+    (email ? email.split('@')[0] : 'User')
+  return {
+    id: user.uid,
+    displayName,
     email,
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(participant))
-  return participant
-}
-
-export function clearParticipant(): void {
-  localStorage.removeItem(STORAGE_KEY)
 }

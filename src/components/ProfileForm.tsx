@@ -1,68 +1,60 @@
-import { useState } from 'react'
-import type { Participant } from '../lib/types'
-import { saveParticipant } from '../lib/participant'
+import { useEffect, useState } from 'react'
+import { useAuth } from '../auth/AuthContext'
 
 type Props = {
-  initial?: Participant | null
-  onSaved: (p: Participant) => void
   submitLabel?: string
+  onSaved?: () => void
 }
 
-export function ProfileForm({ initial, onSaved, submitLabel = 'Save profile' }: Props) {
-  const [displayName, setDisplayName] = useState(initial?.displayName ?? '')
-  const [email, setEmail] = useState(initial?.email ?? '')
+/** Updates Firebase Auth display name (not identity). */
+export function ProfileForm({ submitLabel = 'Save', onSaved }: Props) {
+  const { user, updateDisplayName } = useAuth()
+  const [name, setName] = useState(user?.displayName ?? '')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    setName(user?.displayName ?? '')
+  }, [user?.uid, user?.displayName])
   const [error, setError] = useState<string | null>(null)
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
-    if (!displayName.trim()) {
-      setError('Display name is required.')
+    if (!name.trim()) {
+      setError('Name is required.')
       return
     }
-    if (!email.trim() || !email.includes('@')) {
-      setError('Enter a valid email.')
-      return
+    setBusy(true)
+    try {
+      await updateDisplayName(name.trim())
+      onSaved?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update.')
+    } finally {
+      setBusy(false)
     }
-    const p = saveParticipant({ displayName, email })
-    onSaved(p)
   }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label htmlFor="displayName" className="block text-sm font-medium text-zinc-700">
+        <label htmlFor="display-name" className="block text-sm font-medium text-zinc-700">
           Display name
         </label>
         <input
-          id="displayName"
-          name="displayName"
-          autoComplete="name"
-          value={displayName}
-          onChange={(e) => setDisplayName(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-zinc-400 focus:border-zinc-400 focus:ring-2"
-        />
-      </div>
-      <div>
-        <label htmlFor="email" className="block text-sm font-medium text-zinc-700">
-          Email
-        </label>
-        <input
-          id="email"
-          name="email"
-          type="email"
-          autoComplete="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-zinc-400 focus:border-zinc-400 focus:ring-2"
+          id="display-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-400"
         />
       </div>
       {error ? <p className="text-sm text-red-600">{error}</p> : null}
       <button
         type="submit"
-        className="w-full rounded-lg bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-zinc-800"
+        disabled={busy}
+        className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
       >
-        {submitLabel}
+        {busy ? 'Saving…' : submitLabel}
       </button>
     </form>
   )

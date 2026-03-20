@@ -1,15 +1,22 @@
 import {
   addDoc,
   collection,
+  collectionGroup,
   doc,
+  documentId,
   getDoc,
   getDocs,
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
+  where,
+  writeBatch,
+  deleteField,
   type Firestore,
   type Unsubscribe,
 } from 'firebase/firestore'
@@ -19,13 +26,31 @@ import type {
   AuditEventType,
   CommentDoc,
   Participant,
+  SessionAccessMode,
   SessionDoc,
+  SessionMemberDoc,
   SessionParticipantDoc,
   TaskDoc,
   TaskLink,
   TaskPriority,
   TaskStatus,
 } from '../lib/types'
+
+export class ConflictError extends Error {
+  override name = 'ConflictError'
+  constructor(message = 'Someone else saved changes first.') {
+    super(message)
+  }
+}
+
+function updatedAtMillis(ts: Timestamp | undefined): number {
+  if (!ts || typeof ts.toMillis !== 'function') return -1
+  try {
+    return ts.toMillis()
+  } catch {
+    return -1
+  }
+}
 
 function auditCollection(db: Firestore, sessionId: string) {
   return collection(db, 'sessions', sessionId, 'audit')
@@ -50,6 +75,14 @@ function subtaskCommentsCollection(
   subtaskId: string
 ) {
   return collection(db, 'sessions', sessionId, 'tasks', taskId, 'subtasks', subtaskId, 'comments')
+}
+
+function membersCollection(db: Firestore, sessionId: string) {
+  return collection(db, 'sessions', sessionId, 'members')
+}
+
+function participantsCollection(db: Firestore, sessionId: string) {
+  return collection(db, 'sessions', sessionId, 'participants')
 }
 
 /** When there is at least one subtask: parent is done iff all subtasks are done. */
@@ -97,10 +130,6 @@ async function syncParentTaskStatusFromSubtasks(
   }
 }
 
-function participantsCollection(db: Firestore, sessionId: string) {
-  return collection(db, 'sessions', sessionId, 'participants')
-}
-
 export async function appendAudit(
   db: Firestore,
   sessionId: string,
@@ -119,20 +148,124 @@ export async function appendAudit(
 export async function createSession(
   db: Firestore,
   sessionId: string,
-  input: { title: string; bidLabel: string },
+  input: {
+    title: string
+    bidLabel: string
+    accessMode: SessionAccessMode
+    linkExpiresAt?: Date | null
+  },
   actor: Participant
 ) {
-  await setDoc(doc(db, 'sessions', sessionId), {
+  const batch = writeBatch(db)
+  const sref = doc(db, 'sessions', sessionId)
+  const sessionPayload: Record<string, unknown> = {
     title: input.title.trim(),
     bidLabel: (input.bidLabel ?? '').trim(),
     status: 'active',
     createdAt: serverTimestamp(),
     createdBy: actor,
+    accessMode: input.accessMode,
+  }
+  if (input.linkExpiresAt) {
+    sessionPayload.linkExpiresAt = Timestamp.fromDate(input.linkExpiresAt)
+  }
+  batch.set(sref, sessionPayload)
+  const mref = doc(membersCollection(db, sessionId), actor.id)
+  batch.set(mref, {
+    role: 'admin',
+    email: actor.email,
+    displayName: actor.displayName,
+    joinedAt: serverTimestamp(),
   })
+  await batch.commit()
   await appendAudit(db, sessionId, 'session_created', actor, {
     title: input.title.trim(),
     bidLabel: (input.bidLabel ?? '').trim(),
+    accessMode: input.accessMode,
   })
+}
+
+/** Self-join as editor when session is link_join and link not expired. */
+export async function joinSessionIfAllowed(
+  db: Firestore,
+  sessionId: string,
+  participant: Participant
+) {
+  const mref = doc(membersCollection(db, sessionId), participant.id)
+  const existing = await getDoc(mref)
+  if (existing.exists()) return
+  const sref = doc(db, 'sessions', sessionId)
+  const sSnap = await getDoc(sref)
+  if (!sSnap.exists()) throw new Error('Session not found')
+  const data = sSnap.data() as SessionDoc
+  const mode = data.accessMode ?? 'link_join'
+  if (mode !== 'link_join') {
+    throw new Error('This session requires an invite to join.')
+  }
+  if (data.linkExpiresAt && typeof data.linkExpiresAt.toMillis === 'function') {
+    if (data.linkExpiresAt.toMillis() < Date.now()) {
+      throw new Error('This session link has expired.')
+    }
+  }
+  await setDoc(mref, {
+    role: 'editor',
+    email: participant.email,
+    displayName: participant.displayName,
+    joinedAt: serverTimestamp(),
+  })
+}
+
+export async function updateSessionAccessSettings(
+  db: Firestore,
+  sessionId: string,
+  patch: { accessMode?: SessionAccessMode; linkExpiresAt?: Date | null },
+  actor: Participant
+) {
+  const clean: Record<string, unknown> = {}
+  if (patch.accessMode !== undefined) clean.accessMode = patch.accessMode
+  if (patch.linkExpiresAt !== undefined) {
+    if (patch.linkExpiresAt === null) {
+      clean.linkExpiresAt = deleteField()
+    } else {
+      clean.linkExpiresAt = Timestamp.fromDate(patch.linkExpiresAt)
+    }
+  }
+  if (Object.keys(clean).length === 0) return
+  await updateDoc(doc(db, 'sessions', sessionId), clean)
+  await appendAudit(db, sessionId, 'session_settings_updated', actor, {
+    patch: clean,
+  })
+}
+
+/** Sessions where the current user has a member doc (collection group). */
+export async function fetchSessionIdsForMember(db: Firestore, uid: string): Promise<string[]> {
+  const q = query(collectionGroup(db, 'members'), where(documentId(), '==', uid))
+  const snap = await getDocs(q)
+  return snap.docs.map((d) => {
+    const parent = d.ref.parent
+    const sessionRef = parent.parent
+    return sessionRef?.id ?? ''
+  }).filter(Boolean)
+}
+
+export function subscribeMember(
+  db: Firestore,
+  sessionId: string,
+  uid: string,
+  onData: (data: SessionMemberDoc | null) => void,
+  onError?: (e: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    doc(membersCollection(db, sessionId), uid),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null)
+        return
+      }
+      onData(snap.data() as SessionMemberDoc)
+    },
+    (err) => onError?.(err)
+  )
 }
 
 export async function archiveSession(
@@ -198,7 +331,6 @@ export function subscribeParticipants(
   )
 }
 
-/** Heartbeat so others see you in the session roster. Call on mount and on an interval. */
 export async function upsertSessionPresence(
   db: Firestore,
   sessionId: string,
@@ -236,6 +368,22 @@ export function subscribeComments(
   )
 }
 
+function normalizeTagList(tags: string[] | undefined): string[] {
+  if (!tags?.length) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const t of tags) {
+    const s = t.trim().slice(0, 40)
+    if (!s) continue
+    const k = s.toLowerCase()
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(s)
+    if (out.length >= 20) break
+  }
+  return out
+}
+
 export async function createTask(
   db: Firestore,
   sessionId: string,
@@ -244,10 +392,12 @@ export async function createTask(
     description: string
     priority: TaskPriority
     links: TaskLink[]
+    tags?: string[]
   },
   actor: Participant
 ) {
   const taskRef = doc(tasksCollection(db, sessionId))
+  const tags = normalizeTagList(input.tags)
   const payload = {
     title: input.title.trim(),
     description: input.description.trim(),
@@ -257,6 +407,7 @@ export async function createTask(
     assignees: [] as TaskDoc['assignees'],
     links: input.links.filter((l) => l.url.trim()),
     attachments: [] as TaskDoc['attachments'],
+    tags,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     createdBy: actor,
@@ -280,9 +431,15 @@ export async function updateTaskDetails(
     priority: TaskPriority
     status: TaskStatus
     links: TaskLink[]
+    tags: string[]
   }>,
-  actor: Participant
+  actor: Participant,
+  expectedUpdatedAt?: Timestamp | null
 ) {
+  if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== null) {
+    await updateTaskDetailsTransaction(db, sessionId, taskId, patch, actor, expectedUpdatedAt)
+    return
+  }
   const taskRef = doc(db, 'sessions', sessionId, 'tasks', taskId)
   const clean: Record<string, unknown> = { updatedAt: serverTimestamp() }
   if (patch.title !== undefined) clean.title = patch.title.trim()
@@ -290,7 +447,43 @@ export async function updateTaskDetails(
   if (patch.priority !== undefined) clean.priority = patch.priority
   if (patch.status !== undefined) clean.status = patch.status
   if (patch.links !== undefined) clean.links = patch.links.filter((l) => l.url.trim())
+  if (patch.tags !== undefined) clean.tags = normalizeTagList(patch.tags)
   await updateDoc(taskRef, clean)
+  await appendAudit(db, sessionId, 'task_updated', actor, { taskId, patch })
+}
+
+async function updateTaskDetailsTransaction(
+  db: Firestore,
+  sessionId: string,
+  taskId: string,
+  patch: Partial<{
+    title: string
+    description: string
+    priority: TaskPriority
+    status: TaskStatus
+    links: TaskLink[]
+    tags: string[]
+  }>,
+  actor: Participant,
+  expectedUpdatedAt: Timestamp
+) {
+  const taskRef = doc(db, 'sessions', sessionId, 'tasks', taskId)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(taskRef)
+    if (!snap.exists()) throw new Error('Task not found')
+    const cur = snap.data() as TaskDoc
+    if (updatedAtMillis(cur.updatedAt) !== updatedAtMillis(expectedUpdatedAt)) {
+      throw new ConflictError()
+    }
+    const clean: Record<string, unknown> = { updatedAt: serverTimestamp() }
+    if (patch.title !== undefined) clean.title = patch.title.trim()
+    if (patch.description !== undefined) clean.description = patch.description.trim()
+    if (patch.priority !== undefined) clean.priority = patch.priority
+    if (patch.status !== undefined) clean.status = patch.status
+    if (patch.links !== undefined) clean.links = patch.links.filter((l) => l.url.trim())
+    if (patch.tags !== undefined) clean.tags = normalizeTagList(patch.tags)
+    tx.update(taskRef, clean)
+  })
   await appendAudit(db, sessionId, 'task_updated', actor, { taskId, patch })
 }
 
@@ -429,10 +622,12 @@ export async function createSubtask(
     description: string
     priority: TaskPriority
     links: TaskLink[]
+    tags?: string[]
   },
   actor: Participant
 ) {
   const subRef = doc(subtasksCollection(db, sessionId, taskId))
+  const tags = normalizeTagList(input.tags)
   const payload = {
     title: input.title.trim(),
     description: input.description.trim(),
@@ -442,6 +637,7 @@ export async function createSubtask(
     assignees: [] as TaskDoc['assignees'],
     links: input.links.filter((l) => l.url.trim()),
     attachments: [] as TaskDoc['attachments'],
+    tags,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     createdBy: actor,
@@ -468,17 +664,39 @@ export async function updateSubtaskDetails(
     priority: TaskPriority
     status: TaskStatus
     links: TaskLink[]
+    tags: string[]
   }>,
-  actor: Participant
+  actor: Participant,
+  expectedUpdatedAt?: Timestamp | null
 ) {
   const subRef = doc(db, 'sessions', sessionId, 'tasks', taskId, 'subtasks', subtaskId)
-  const clean: Record<string, unknown> = { updatedAt: serverTimestamp() }
-  if (patch.title !== undefined) clean.title = patch.title.trim()
-  if (patch.description !== undefined) clean.description = patch.description.trim()
-  if (patch.priority !== undefined) clean.priority = patch.priority
-  if (patch.status !== undefined) clean.status = patch.status
-  if (patch.links !== undefined) clean.links = patch.links.filter((l) => l.url.trim())
-  await updateDoc(subRef, clean)
+  if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== null) {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(subRef)
+      if (!snap.exists()) throw new Error('Subtask not found')
+      const cur = snap.data() as TaskDoc
+      if (updatedAtMillis(cur.updatedAt) !== updatedAtMillis(expectedUpdatedAt)) {
+        throw new ConflictError()
+      }
+      const clean: Record<string, unknown> = { updatedAt: serverTimestamp() }
+      if (patch.title !== undefined) clean.title = patch.title.trim()
+      if (patch.description !== undefined) clean.description = patch.description.trim()
+      if (patch.priority !== undefined) clean.priority = patch.priority
+      if (patch.status !== undefined) clean.status = patch.status
+      if (patch.links !== undefined) clean.links = patch.links.filter((l) => l.url.trim())
+      if (patch.tags !== undefined) clean.tags = normalizeTagList(patch.tags)
+      tx.update(subRef, clean)
+    })
+  } else {
+    const clean: Record<string, unknown> = { updatedAt: serverTimestamp() }
+    if (patch.title !== undefined) clean.title = patch.title.trim()
+    if (patch.description !== undefined) clean.description = patch.description.trim()
+    if (patch.priority !== undefined) clean.priority = patch.priority
+    if (patch.status !== undefined) clean.status = patch.status
+    if (patch.links !== undefined) clean.links = patch.links.filter((l) => l.url.trim())
+    if (patch.tags !== undefined) clean.tags = normalizeTagList(patch.tags)
+    await updateDoc(subRef, clean)
+  }
   await appendAudit(db, sessionId, 'subtask_updated', actor, { taskId, subtaskId, patch })
   await syncParentTaskStatusFromSubtasks(db, sessionId, taskId, actor)
 }
