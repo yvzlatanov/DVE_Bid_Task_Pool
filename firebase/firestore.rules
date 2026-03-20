@@ -5,7 +5,7 @@ service cloud.firestore {
       return p is map
         && p.keys().hasAll(['id', 'displayName', 'email'])
         && p.id is string
-        && p.id.size() > 0 && p.id.size() <= 128
+        && p.id.size() > 0 && p.id.size() <= 1500
         && p.displayName is string
         && p.displayName.size() > 0 && p.displayName.size() <= 200
         && p.email is string
@@ -34,6 +34,26 @@ service cloud.firestore {
         && request.resource.data.status in ['active', 'archived'];
 
       allow delete: if false;
+
+      match /participants/{participantId} {
+        allow read: if true;
+        allow create: if participantId == request.resource.data.id
+          && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
+          && request.resource.data.id is string
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() > 0
+          && request.resource.data.displayName.size() <= 200
+          && request.resource.data.email is string
+          && request.resource.data.email.size() <= 320;
+        allow update: if resource != null
+          && participantId == request.resource.data.id
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() > 0
+          && request.resource.data.email is string;
+        allow delete: if false;
+      }
 
       match /tasks/{taskId} {
         allow read: if true;
@@ -74,24 +94,44 @@ service cloud.firestore {
           allow update, delete: if false;
         }
 
-        match /participants/{participantId} {
+        match /subtasks/{subtaskId} {
           allow read: if true;
-          allow create: if participantId == request.resource.data.id
-            && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
-            && request.resource.data.id is string
-            && request.resource.data.displayName is string
-            && request.resource.data.displayName.size() > 0
-            && request.resource.data.displayName.size() <= 200
-            && request.resource.data.email is string
-            && request.resource.data.email.size() <= 320;
-          allow update: if resource != null
-            && participantId == request.resource.data.id
-            && request.resource.data.id == resource.data.id
-            && request.resource.data.keys().hasAll(['id', 'displayName', 'email', 'joinedAt', 'lastSeen'])
-            && request.resource.data.displayName is string
-            && request.resource.data.displayName.size() > 0
-            && request.resource.data.email is string;
+          allow create: if request.resource.data.keys().hasAll([
+                'title',
+                'description',
+                'priority',
+                'status',
+                'assigneeIds',
+                'assignees',
+                'links',
+                'attachments',
+                'createdAt',
+                'updatedAt',
+                'createdBy'
+              ])
+            && request.resource.data.title is string
+            && request.resource.data.title.size() <= 400
+            && request.resource.data.description is string
+            && request.resource.data.description.size() <= 20000
+            && request.resource.data.priority in ['low', 'medium', 'high', 'urgent']
+            && request.resource.data.status in ['pooled', 'in_progress', 'done', 'blocked']
+            && request.resource.data.assigneeIds is list
+            && request.resource.data.assignees is list
+            && request.resource.data.links is list
+            && request.resource.data.attachments is list
+            && validParticipant(request.resource.data.createdBy);
+          allow update: if resource != null;
           allow delete: if false;
+
+          match /comments/{subCommentId} {
+            allow read: if true;
+            allow create: if request.resource.data.keys().hasAll(['text', 'createdAt', 'createdBy'])
+              && request.resource.data.text is string
+              && request.resource.data.text.size() > 0
+              && request.resource.data.text.size() <= 8000
+              && validParticipant(request.resource.data.createdBy);
+            allow update, delete: if false;
+          }
         }
       }
 

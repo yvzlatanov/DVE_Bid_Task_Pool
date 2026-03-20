@@ -8,5 +8,13 @@ service firebase.storage {
         && request.resource != null
         && request.resource.size < 15 * 1024 * 1024;
     }
+
+    match /sessions/{sessionId}/tasks/{taskId}/subtasks/{subtaskId}/{fileName} {
+      allow read: if true;
+      allow write: if fileName.size() > 0
+        && fileName.size() < 500
+        && request.resource != null
+        && request.resource.size < 15 * 1024 * 1024;
+    }
   }
 }

@@ -10,6 +10,7 @@ import {
   archiveSession,
   subscribeParticipants,
   subscribeSession,
+  subscribeSubtasks,
   subscribeTasks,
   upsertSessionPresence,
 } from '../firebase/sessionApi'
@@ -41,8 +42,16 @@ export function SessionPage() {
   const [banner, setBanner] = useState<string | null>(null)
   const [peopleOpen, setPeopleOpen] = useState(false)
   const [participants, setParticipants] = useState<{ id: string; data: SessionParticipantDoc }[]>([])
+  const [subtasksByTaskId, setSubtasksByTaskId] = useState<
+    Record<string, { id: string; data: TaskDoc }[]>
+  >({})
 
   const sid = sessionId ?? ''
+
+  const taskIdsKey = useMemo(() => {
+    const ids = [...new Set(tasks.map((t) => t.id))].sort()
+    return ids.join('|')
+  }, [tasks])
 
   useEffect(() => {
     if (!db || !sid) return
@@ -77,6 +86,28 @@ export function SessionPage() {
     if (!db || !sid) return
     return subscribeParticipants(db, sid, setParticipants)
   }, [db, sid])
+
+  useEffect(() => {
+    if (!db || !sid) return
+    const ids = [...new Set(tasks.map((t) => t.id))].sort()
+    setSubtasksByTaskId({})
+    if (ids.length === 0) return
+    const unsubs = ids.map((taskId) =>
+      subscribeSubtasks(db, sid, taskId, (list) => {
+        setSubtasksByTaskId((prev) => ({ ...prev, [taskId]: list }))
+      })
+    )
+    return () => unsubs.forEach((u) => u())
+  }, [db, sid, taskIdsKey])
+
+  const subtasksForPeople = useMemo(() => {
+    const out: Record<string, { id: string; data: TaskDoc }[]> = {}
+    for (const t of tasks) {
+      const list = subtasksByTaskId[t.id]
+      if (list?.length) out[t.id] = list
+    }
+    return out
+  }, [tasks, subtasksByTaskId])
 
   // List users as soon as they have a profile on this URL (including while session doc is still loading).
   useEffect(() => {
@@ -323,6 +354,7 @@ export function SessionPage() {
 
       {selectedTask ? (
         <TaskDetailModal
+          variant="task"
           sessionId={sid}
           task={selectedTask}
           participant={participant}
@@ -336,6 +368,7 @@ export function SessionPage() {
         onClose={() => setPeopleOpen(false)}
         participants={participants}
         tasks={tasks}
+        subtasksByTaskId={subtasksForPeople}
       />
     </div>
   )

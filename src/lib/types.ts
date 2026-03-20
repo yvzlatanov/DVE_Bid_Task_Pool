@@ -60,6 +60,12 @@ export type AuditEventType =
   | 'comment_added'
   | 'attachment_added'
   | 'session_archived'
+  | 'subtask_created'
+  | 'subtask_updated'
+  | 'subtask_claimed'
+  | 'subtask_released'
+  | 'subtask_comment_added'
+  | 'subtask_attachment_added'
 
 export type AuditEventDoc = {
   type: AuditEventType
@@ -73,6 +79,7 @@ export type SessionParticipantDoc = {
   id: string
   displayName: string
   email: string
-  joinedAt: Timestamp
-  lastSeen: Timestamp
+  /** Set on first check-in; may be missing on very old documents. */
+  joinedAt?: Timestamp
+  lastSeen?: Timestamp
 }

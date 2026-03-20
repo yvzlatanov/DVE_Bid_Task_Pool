@@ -4,7 +4,7 @@ import type { SessionParticipantDoc, TaskDoc } from '../lib/types'
 
 const STALE_MS = 4 * 60 * 1000
 
-function lastSeenMs(ts: Timestamp | undefined): number {
+function tsMs(ts: Timestamp | undefined): number {
   if (!ts || typeof ts.toMillis !== 'function') return 0
   try {
     return ts.toMillis()
@@ -13,10 +13,17 @@ function lastSeenMs(ts: Timestamp | undefined): number {
   }
 }
 
-function isStale(ts: Timestamp | undefined): boolean {
-  const ms = lastSeenMs(ts)
-  if (!ms) return true
-  return Date.now() - ms > STALE_MS
+/** Use lastSeen when resolved; otherwise joinedAt. Unresolved server timestamps (0) count as fresh so new joiners appear in Available. */
+function effectivePresenceMs(p: SessionParticipantDoc): number {
+  const ls = tsMs(p.lastSeen)
+  const j = tsMs(p.joinedAt)
+  return Math.max(ls, j)
+}
+
+function isParticipantStale(p: SessionParticipantDoc): boolean {
+  const eff = effectivePresenceMs(p)
+  if (!eff) return false
+  return Date.now() - eff > STALE_MS
 }
 
 type TaskRow = { id: string; data: TaskDoc }
@@ -26,11 +33,13 @@ type Props = {
   onClose: () => void
   participants: { id: string; data: SessionParticipantDoc }[]
   tasks: TaskRow[]
+  /** Subtasks keyed by parent task id (used for “busy” / availability). */
+  subtasksByTaskId?: Record<string, TaskRow[]>
 }
 
-function formatSeen(ts: Timestamp | undefined): string {
-  const ms = lastSeenMs(ts)
-  if (!ms) return 'Unknown'
+function formatSeen(p: SessionParticipantDoc): string {
+  const ms = effectivePresenceMs(p)
+  if (!ms) return 'Just now'
   try {
     return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   } catch {
@@ -43,23 +52,38 @@ function dedupePresenceByEmail(list: { id: string; data: SessionParticipantDoc }
   for (const p of list) {
     const k = normalizeEmail(p.data.email)
     const cur = map.get(k)
-    if (!cur || lastSeenMs(p.data.lastSeen) > lastSeenMs(cur.data.lastSeen)) {
+    if (!cur || effectivePresenceMs(p.data) > effectivePresenceMs(cur.data)) {
       map.set(k, p)
     }
   }
   return [...map.values()]
 }
 
-export function PeoplePanel({ open, onClose, participants, tasks }: Props) {
+type BusyRef = { taskId: string; title: string }
+
+export function PeoplePanel({ open, onClose, participants, tasks, subtasksByTaskId }: Props) {
   const activeTasks = tasks.filter((t) => t.data.status !== 'done')
 
-  const busyByEmail = new Map<string, { taskId: string; title: string }[]>()
+  const busyByEmail = new Map<string, BusyRef[]>()
   for (const t of activeTasks) {
     for (const a of uniqueAssigneesByEmail(t.data.assignees ?? [])) {
       const k = normalizeEmail(a.email)
       const list = busyByEmail.get(k) ?? []
       list.push({ taskId: t.id, title: t.data.title })
       busyByEmail.set(k, list)
+    }
+    const subs = subtasksByTaskId?.[t.id] ?? []
+    for (const st of subs) {
+      if (st.data.status === 'done') continue
+      for (const a of uniqueAssigneesByEmail(st.data.assignees ?? [])) {
+        const k = normalizeEmail(a.email)
+        const list = busyByEmail.get(k) ?? []
+        list.push({
+          taskId: t.id,
+          title: `${t.data.title} › ${st.data.title}`,
+        })
+        busyByEmail.set(k, list)
+      }
     }
   }
 
@@ -68,7 +92,7 @@ export function PeoplePanel({ open, onClose, participants, tasks }: Props) {
   )
 
   const available = sorted.filter(
-    (p) => !isStale(p.data.lastSeen) && !busyByEmail.has(normalizeEmail(p.data.email))
+    (p) => !isParticipantStale(p.data) && !busyByEmail.has(normalizeEmail(p.data.email))
   )
 
   if (!open) return null
@@ -129,7 +153,15 @@ export function PeoplePanel({ open, onClose, participants, tasks }: Props) {
             <p className="mt-1 text-xs text-zinc-500">Multiple people can share the same task.</p>
             <ul className="mt-3 space-y-4">
               {activeTasks
-                .filter((t) => uniqueAssigneesByEmail(t.data.assignees ?? []).length > 0)
+                .filter((t) => {
+                  const onTask = uniqueAssigneesByEmail(t.data.assignees ?? []).length > 0
+                  const subBusy = (subtasksByTaskId?.[t.id] ?? []).some(
+                    (s) =>
+                      s.data.status !== 'done' &&
+                      uniqueAssigneesByEmail(s.data.assignees ?? []).length > 0
+                  )
+                  return onTask || subBusy
+                })
                 .map((t) => (
                   <li key={t.id} className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
                     <p className="font-medium text-zinc-900">{t.data.title}</p>
@@ -141,10 +173,38 @@ export function PeoplePanel({ open, onClose, participants, tasks }: Props) {
                         </li>
                       ))}
                     </ul>
+                    {(subtasksByTaskId?.[t.id] ?? [])
+                      .filter(
+                        (s) =>
+                          s.data.status !== 'done' &&
+                          uniqueAssigneesByEmail(s.data.assignees ?? []).length > 0
+                      )
+                      .map((s) => (
+                        <div
+                          key={s.id}
+                          className="mt-3 border-l-2 border-zinc-300 pl-3 text-xs text-zinc-700"
+                        >
+                          <p className="font-medium text-zinc-800">{s.data.title}</p>
+                          <p className="text-zinc-500 capitalize">{s.data.status.replace('_', ' ')}</p>
+                          <ul className="mt-1 space-y-0.5">
+                            {uniqueAssigneesByEmail(s.data.assignees ?? []).map((a) => (
+                              <li key={a.id}>{a.displayName}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
                   </li>
                 ))}
-              {!activeTasks.some((t) => uniqueAssigneesByEmail(t.data.assignees ?? []).length > 0) ? (
-                <li className="text-xs text-zinc-500">No assignments on open tasks yet.</li>
+              {!activeTasks.some((t) => {
+                const onTask = uniqueAssigneesByEmail(t.data.assignees ?? []).length > 0
+                const subBusy = (subtasksByTaskId?.[t.id] ?? []).some(
+                  (s) =>
+                    s.data.status !== 'done' &&
+                    uniqueAssigneesByEmail(s.data.assignees ?? []).length > 0
+                )
+                return onTask || subBusy
+              }) ? (
+                <li className="text-xs text-zinc-500">No assignments on open tasks or subtasks yet.</li>
               ) : null}
             </ul>
           </section>
@@ -153,7 +213,7 @@ export function PeoplePanel({ open, onClose, participants, tasks }: Props) {
             <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Everyone here</h3>
             <ul className="mt-2 space-y-2">
               {sorted.map((p) => {
-                const stale = isStale(p.data.lastSeen)
+                const stale = isParticipantStale(p.data)
                 const busy = busyByEmail.get(normalizeEmail(p.data.email))
                 return (
                   <li
@@ -166,7 +226,7 @@ export function PeoplePanel({ open, onClose, participants, tasks }: Props) {
                     <div className="text-xs text-zinc-600">{p.data.email}</div>
                     <div className="mt-1 text-xs text-zinc-500">
                       {stale ? 'Away or inactive · last active ' : 'Last active '}
-                      {formatSeen(p.data.lastSeen)}
+                      {formatSeen(p.data)}
                     </div>
                     {busy?.length ? (
                       <div className="mt-1 text-xs text-zinc-600">
