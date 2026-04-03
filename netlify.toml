@@ -1,3 +1,7 @@
+# After deploying to a new Netlify URL, add that host in Firebase Console:
+# Authentication → Settings → Authorized domains (e.g. dve-bid-task-pool.netlify.app).
+# Otherwise Google/Microsoft sign-in shows "domain is not authorized for OAuth".
+
 [build]
   command = "npm run build"
   publish = "dist"
